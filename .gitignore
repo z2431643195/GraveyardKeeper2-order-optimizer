@@ -1,0 +1,21 @@
+# 构建产物 Build output
+bin/
+obj/
+release/
+
+# AI 生成的宣传图（体积大，不进仓库 | large AI artwork, not committed）
+artwork/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userprefs
+
+# 临时文件 Temp
+*.tmp
+*.log
+Thumbs.db
+Desktop.ini

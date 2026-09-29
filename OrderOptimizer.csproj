@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 游戏路径：可用 -p:GameDir="..." 覆盖 -->
+  <PropertyGroup>
+    <GameDir Condition=" '$(GameDir)' == '' ">E:\SteamLibrary\steamapps\common\Graveyard Keeper 2</GameDir>
+    <ManagedDir>$(GameDir)\GraveyardKeeper2_Data\Managed\</ManagedDir>
+    <BepInExCoreDir>$(GameDir)\BepInEx\core\</BepInExCoreDir>
+    <PluginsDir>$(GameDir)\BepInEx\plugins\</PluginsDir>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>OrderOptimizer</AssemblyName>
+    <RootNamespace>OrderOptimizer</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS0436;NU1701;MSB3277</NoWarn>
+
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Product>GK2 OrderOptimizer</Product>
+    <Authors>z2431643195</Authors>
+    <Company>z2431643195</Company>
+    <Copyright>Copyright © 2026 z2431643195</Copyright>
+    <Description>Order system optimization for the town warehouse in Graveyard Keeper 2. Delivery (porter) stations no longer ship boxes nobody ordered: each station's per-item toggles are kept aligned with the orders you actually accepted, and a station only starts loading once the whole batch is ready. The order window side is covered too - the one-delivery-per-order-per-week limit can be lifted, the number of order slots is configurable (2-12) and wraps into rows, and one-off orders can optionally be made repeatable.</Description>
+  </PropertyGroup>
+
+  <!-- Private False: 编译时不把游戏 DLL 复制到输出目录 -->
+  <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCoreDir)0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCoreDir)BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>$(ManagedDir)Assembly-CSharp-firstpass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="LazyBearTechnology">
+      <HintPath>$(ManagedDir)LazyBearTechnology.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedDir)UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 订单槽位换行布局（GridLayoutGroup / LayoutGroup / LayoutRebuilder）需要 UI 模块 -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedDir)UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ManagedDir)UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedDir)UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 编译成功后自动拷贝到 BepInEx\plugins -->
+  <Target Name="CopyToPlugins" AfterTargets="Build">
+    <Message Importance="high" Text="正在拷贝到游戏插件目录: $(PluginsDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginsDir)" Condition="Exists('$(PluginsDir)')" />
+  </Target>
+
+</Project>

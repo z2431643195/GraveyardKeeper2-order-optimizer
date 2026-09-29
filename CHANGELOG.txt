@@ -1,0 +1,122 @@
+Changelog 更新日志
+==================
+
+v1.0.0  (2026-09-29)
+--------------------
+新增 / New
+- 首个版本发布：小镇搬运站（交付站）只送【真的接了订单】的箱种，不再有库存就无脑发货。
+  First release: the town delivery stations now ship only what your accepted orders need,
+  instead of sending every box they happen to have in stock.
+- 每 2 秒（可调）刷新站点上那排逐项开关：缺口大于 0 打开，否则关闭。
+  The per-item toggles of every managed station are refreshed every 2 seconds (adjustable):
+  a toggle is switched on when its gap is above zero, otherwise off.
+- 缺口 等于【订单需要量 减 已交付量 减 小镇托盘上已有的数量】；紧急订单按整批计算，
+  因为游戏只在一整批到齐的时候才结算。
+  The gap equals order amount minus already delivered amount minus what is already on the town
+  palettes. Urgent orders count as one whole batch, because the game only resolves them when the
+  full batch has arrived.
+- 默认【凑齐整批才发车】（RequireFullBatch）：只有当基地里备齐这一单还需要的数量时才允许装货，
+  不够就一个都不搬 —— 保证每单都能完成、拿到好感奖励，不再零散发货。
+  把 RequireFullBatch 改成 false 即回到【有多少送多少】。
+- 搬运工背包可调（PorterInventorySize，默认 64 格）：原版背包是硬编码 4 格，而一箱补给占 2 格，
+  所以原版一趟只能搬 2 箱；64 格 = 一趟最多 32 箱，最大订单（30 箱）可以一次搬完。
+  填 4 回到原版容量。这是"只改一处"的做法 —— 不去动物品尺寸（ItemSize.Big 被约 40 处逻辑依赖：
+  掉落模型、物理碰撞、玩家搬运方式、容器白名单等）。
+  作用范围**只限本 mod 管辖的交付站**（补给仓库往小镇送货那条线）上挂着的搬运工；
+  矿场、采石场、葡萄园、伐木场、吊车等站的搬运工与开关一概不碰。
+- 每趟只装【这一单还差的数量】：原版装货会把能装的全都装上（背包 64 格 = 32 箱），
+  所以本 mod 在装货方法 `ZombieWgoData.PorterTryTakeItemFromInventory` 的头尾加了闸门 ——
+  够了就不装，装完把超出缺口的部分退还原容器（退不回去就放回背包，不丢货）。
+  跨区物流走的是同一个方法，所以两条路径都覆盖；其它搬运站一路放行。
+  Each trip only loads the amount the order still needs. The vanilla loading step fills the whole bag
+  (64 slots = 32 boxes), so the mod gates the head and tail of the loading method: it skips loading
+  once the gap is covered, and returns anything above the gap to the source container (never losing
+  an item). The cross-zone logistics mod loads through the same method, so both paths are covered;
+  other porter stations pass through untouched.
+- 放行判据把"在途"算进来：还差 = 缺口 减 已经在搬运工手上的数量。
+  否则刚装走的几箱会让基地库存下跌、开关被误关，大订单会卡住。
+  The start condition now counts cargo already carried by the porters: stillToSend = gap minus the
+  amount in their hands. Without it the base stock drops as soon as a trip leaves and the toggle is
+  switched off by mistake, which stalls orders larger than one trip.
+- 装货上限改为**显式挂钩**并在启动时把结果写进日志：之前用 PatchAll 扫描时，补丁类是 internal
+  嵌套类，被扫描跳过、静默失效（表现为"什么都没拦"）。现在直接对目标方法调用 Patch，
+  日志里会有 `已挂钩装货上限` 一行，成功与否一眼可查。
+  The loading cap is now hooked explicitly and reports the result at startup. With the previous
+  PatchAll scan the patch class was an internal nested type and got skipped silently, so nothing was
+  capped. The explicit Patch call logs `已挂钩装货上限` so success is visible.
+- 新增【解除每周限制】（ResetWeeklyOrderLock，默认开）：原版同一订单每周只能交一次（结算时打"本周已完成"
+  标记，要等 day_pride 才清零）。现在改成完成即清零 —— Harmony Postfix 挂在那唯一的写入点
+  （VendorOrderData.MarkFinishedThisWeek），另有一遍每轮扫描兜底。可再生订单交完立刻能再接。
+- 配置瘦身：主 cfg 只保留用户级 6 项（Enabled / RequireFullBatch / PorterInventorySize /
+  ResetWeeklyOrderLock / OrderSlotsEnabled / OrderSlots）；其余 5 项（StockScope、UpdateIntervalSeconds、
+  OrderSlotsPerRow、RepeatNonRenewableOrders、VerboseLogging）移到 `gk2.OrderOptimizer.advanced.cfg`
+  —— 该文件不自动生成，删掉即用默认值，需要的人自己写要改的键。
+- 作用范围写死、不再可调：删掉 OnlyTownStations 开关，mod 只操作【往小镇送货的那台交付站 + 它上面的
+  搬运僵尸】与【小镇仓库的订单面板（订单数据）】两样东西，其它搬运站一律不碰。
+- PorterInventorySize 的说明写清作用范围：只改【补给仓库里那台交付站】上的搬运僵尸（你在那儿安排的
+  专职搬运工）；矿场、采石场、葡萄园、伐木场、吊车等**别的搬运站**与它无关，那些站的僵尸背包保持原版 4 格。
+- 详细日志默认关闭（发布版不再往日志里写记录）。
+  Config slimmed down: the main cfg now exposes only the six user-facing switches; the other six keys
+  moved into a deliberately hidden gk2.OrderOptimizer.advanced.cfg (not auto-created - delete it to use
+  defaults, create it to override). PorterInventorySize now states that only supply-warehouse delivery
+  station porters are resized, and verbose logging is off by default in the release.
+- 发布默认改为"完全不动原版玩法"：
+    · ResetWeeklyOrderLock 默认 **false**（原为 true）：每周限制默认保留，想解除请手动打开；
+    · 新增 OrderSlotsEnabled（默认 **false**）：false = 把槽位**收回原版数量**，并**取消**被收掉槽位上的订单
+      （槽位写在存档里，收回是真实删除）；true = 按 OrderSlots（2~12）管理，可增可减。
+      被取消的订单若"已交付但未领奖"，会打一行 ⚠ 日志明确提示奖励作废，不会静默吞掉。
+- 槽位管理从"只增不减"改为"**可增可减**"，12 → 2 的回退路径打通。
+  Released defaults now change nothing: ResetWeeklyOrderLock is false by default, and the new
+  OrderSlotsEnabled (false by default) shrinks the slots back to the vanilla count while cancelling any
+  order that sat on a removed slot. Slot management is grow/shrink now instead of grow-only.
+- 新增 OrderSlots（默认 2 = 原版）：订单窗口槽位数量可调（2~12），界面按槽位数动态生成控件。
+- 新增 OrderSlotsPerRow（默认 0 = 关）：槽位多于一行时自动换行。实现**不用 Unity 布局组件**
+  （试过 GridLayoutGroup：运行期 AddComponent 抛空引用，且停掉原布局组会让 ContentSizeFitter
+  把容器压成 0，导致整排歪到一边），改成自己算坐标：停掉容器的布局组与 ContentSizeFitter、
+  写死容器尺寸、逐格设 anchor/pivot/anchoredPosition。每次窗口重绘后重排一次，
+  并在下一帧再补一遍（Unity 把 ContentSizeFitter 与 LayoutGroup 叠在同一节点时需要第二遍布局才稳定，
+  否则"第一次打开窗口"会看到半归位的乱样）。格子尺寸只量一次并缓存，杜绝逐次累加。
+- 界面即时刷新：领奖后下一帧重绘订单窗口与选单窗口，刚交完的订单当场就能再接（不必关窗重开）。
+  Added OrderSlotsPerRow (wrapping via GridLayoutGroup) and an immediate UI refresh after collecting a
+  reward, so a freshly finished order can be accepted again without closing and reopening the window.
+- 新增 RepeatNonRenewableOrders（默认关）：打开后一次性订单也能重复交（奖励领完、槽位空出后重置）。
+  Added removing the weekly order limits (ResetWeeklyOrderLock, on by default), a configurable order slot
+  count (OrderSlots, 2 = vanilla) and repeatable one-off orders (RepeatNonRenewableOrders, off by default).
+- 「凑齐整批」加第二道闸门（装货层）：手动把站点开关点开也破不了整批规则 ——
+  装货前再判一次"这批备齐了没"，没齐就不让装车（装不上 ⇒ 原版"背包非空才发车"不成立 ⇒ 不发车）。
+  被拦下时日志会写 [batch] 整批未齐，拦下这一趟：…
+  The full-batch rule got a second gate at the loading step: flipping a station switch on by hand no
+  longer defeats it. Loading is refused unless the whole batch is ready, so nothing departs in
+  dribbles. When this blocks a trip the log says: [batch] ...
+- 库存读取范围可配（StockScope，默认 StationZone）：只数**交付站所在区域**（补给仓库）里的容器 ——
+  与搬运工实际装货的名单完全一致，所以"凑齐整批"= 补给仓里备齐整批；改成 WholeBase 则数整个基地。
+  Where stock is counted is configurable now (StockScope, StationZone by default): only the containers of
+  the delivery station's own area (the supply warehouse), which is exactly the list the porters load
+  from. Set it to WholeBase to count every area of the base instead.
+- 修正裁剪口径：Prefix 算出的"还能再装多少"曾被 Postfix 当成"总共该带多少"来裁，
+  于是把已经装好的也裁掉了（表现为一趟只带走一两箱）。现在裁剪一律按【订单缺口】这个总量算。
+  Fixed the trim target: the Prefix computed "how much more may be taken", but the Postfix used it as
+  "how much may be carried in total", so it cut into the cargo that was already loaded (the porter
+  ended up leaving with one or two boxes). The trim now uses the order gap as the total cap.
+  Adjustable porter bag (PorterInventorySize, 64 slots by default): the vanilla bag is a hard-coded
+  4 slots and a supply box takes 2 of them, so vanilla carries 2 boxes per trip. 64 slots = up to 32
+  boxes, enough for the largest order in a single trip. Set 4 for vanilla. Only one line of the game
+  is touched - item sizes (ItemSize.Big) are left alone because roughly 40 places depend on them.
+  The bag resize only applies to porters attached to the managed delivery stations (the supply line
+  that ships boxes to town); mine, quarry, vineyard, sawmill and cargo-lift porters stay untouched.
+  By default a station only starts loading once the base holds the whole amount the order still
+  needs, so every order completes and pays its reward instead of being delivered in useless
+  dribbles. Physical limit: a supply box is a Big item and takes 2 of the porter's 4 slots, so a
+  porter carries at most 2 boxes per trip - a batch is delivered over consecutive trips.
+- 只接管订单目录里出现过的 22 种箱子；矿石、石料、木材、农作物等非订单物品永不触碰，
+  矿场 / 采石场 / 葡萄园那些搬运站不受影响。
+  Only the 22 box types from the order catalogue are managed. Ore, stone, wood, crops and every
+  other non-order item are never touched, so the mine, quarry and vineyard porter stations keep
+  working exactly as before.
+- 默认只作用于【目的地含小镇托盘】的交付站。
+  By default only delivery stations whose destination contains a town palette are managed.
+- 兼容跨区物流类 mod（Zombie Cross-Zone Logistics / Shared Base Storage）：
+  写的是游戏自己的站点开关，原版装货与跨区装货两条路径都读它。
+  Compatible with cross-zone logistics mods (Zombie Cross-Zone Logistics / Shared Base Storage):
+  the mod writes the game's own station toggles, which both the vanilla and the cross-zone loading
+  paths read.
