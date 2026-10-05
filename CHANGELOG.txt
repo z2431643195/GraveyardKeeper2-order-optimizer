@@ -1,6 +1,46 @@
 Changelog 更新日志
 ==================
 
+v1.0.1  (2026-10-05)
+--------------------
+修正 / Fixes
+- ★ 解决【多种订单同时进行时整批永远凑不齐、生产全停】（N 网用户反馈）：真因**不是** RequireFullBatch，
+  而是补给仓的【取货货架】太小 —— 原版 conveyor_storage_t1 只有 2 格、t2 只有 4 格（定义表 wgoDefs.tsv），
+  而订单要一次备齐 5 至 30 箱；多张订单同时排队时货架剩余格数永远不够，判据就永远不成立、开关永不打开。
+  新增高级项 LoadingShelfSize（默认 40）：按原版 4 格为基准等比放大 —— t2 4→40、t1 2→20；只增不减，
+  填 0 则还原成原版格数。实测：8 个货架 32 格 → 320 格，原本卡住的订单立刻能发车。
+  Fixed the "whole batch never completes and production stalls" issue from the Nexus report: the real cause is
+  not RequireFullBatch but the tiny loading shelves (vanilla conveyor_storage_t1 = 2 slots, t2 = 4) while an
+  order needs 5 to 30 boxes staged at once. New advanced key LoadingShelfSize (default 40) scales them from a
+  4-slot baseline: t2 4 -> 40, t1 2 -> 20. It never shrinks; 0 restores the vanilla sizes. Measured in game:
+  8 shelves went from 32 to 320 slots and the stalled orders ship right away.
+- 说明：扩容后货架在**画面上仍然只画 4 个箱子** —— 它实际能放下 40 个，多出来的箱子只是不画出来而已，
+  **不会丢失**（实测：存档来回之后箱子仍在、订单照常计数；把该项填回 0 时也只在箱子里放得下时才缩）。
+  Note: after enlarging, the shelf model still draws only 4 boxes - it really holds 40, the extra ones are
+  simply not rendered and nothing is lost (verified across a save and reload; setting the value back to 0 only
+  shrinks a shelf when its contents already fit).
+- 修复：`IsTownDeliveryStation` 会把"世界还没就绪时算出的 false"永久缓存进 TownStationCache，导致那一局
+  所有交付站都不被接管（现象：日志里少了 [bag] 行、站点开关不再随订单动作）。现在只在确实看到容器数据
+  时才写缓存。
+- 修复：小镇托盘诊断行只打一次，永远是"进存档那一刻"的快照（用户实测抓到）。现在第一行必打，
+  之后数字变化时再补一行；并且取货容器清单改到扩容之后再打，显示的是实际格数。
+- 移除未发布的 TownPaletteSize（它瞄准的是本来就有 999 格的小镇托盘，方向不对）。
+  Removed the unreleased TownPaletteSize key (it targeted the 999-slot town palettes - the wrong end).
+
+新增 / New
+- 新增高级项 OrdersEveryDay（默认关）：**解除【只有 day_pride 那天能接单】的原版限制** —— 原版靠两条
+  按天触发的 GameLogic（定义表 gameLogicsDefs.tsv）在当天 1% 把粉笔板设 1、99% 又设回 0，而接单判定
+  要求粉笔板大于 0（源码 208885）。打开后粉笔板一直保持开启（按游戏自己的写法，源码 248618），并把
+  订单上的"本周已完成"标记一并清掉（领奖那一刻 + 每轮兜底）⇒ 哪天都能接，刚交完的单当天就能再接。
+  Added the advanced key OrdersEveryDay (off by default): removes the vanilla "orders only on the pride day"
+  restriction by keeping the chalk board enabled, and clears the "finished this week" flag as well.
+- 新增高级项 PaletteSpaceGuard（默认开）：按小镇托盘的空闲格数给订单排队（只放行装得下的，优先最接近
+  完成的），避免多张紧急单把托盘塞满半成品、谁都结算不了；托盘被占满时会打一行 ⚠ 提示。
+  Added the advanced key PaletteSpaceGuard (on by default): queues orders against the free palette space.
+- 订单窗口槽位换行改为【自动】（N 网用户建议）：OrderSlotsPerRow 默认 0 = 按画布宽度尽量多放（最多 6 个
+  一排），开启更多槽位时不用再手填数字。
+  Order slots now wrap automatically: OrderSlotsPerRow defaults to 0 = fit the canvas width, up to 6 per row.
+
 v1.0.0  (2026-09-29)
 --------------------
 新增 / New

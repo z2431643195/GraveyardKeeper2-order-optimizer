@@ -36,6 +36,20 @@ Besides the toggle layer, the loading step itself checks again: even if you flip
 判据两边完全一致：`库存 + 在途 ≥ 缺口`。用【在途】是为了让判据在装货过程中保持恒定（每装走一箱，库存 −1、在途 +1）。
 Both gates use exactly the same rule: `stock + in transit >= gap`. "In transit" keeps the rule stable while a trip is loading, because every box taken moves one unit from stock into the porter's hands.
 
+### 多张订单同时进行：按托盘空间排队 Queueing by palette space
+
+紧急订单要【整批同时躺在托盘上】才结算（源码 97499：托盘现有量 ≥ 需求总量才推进），而小镇托盘总格数 = `warehouse` + `warehouse_cellar` 两区里所有 `TownPalette` 的格数之和（97488）。所以多张订单一起发车时，托盘会被几张半成品分着占满 ⇒ 谁都凑不齐整批 ⇒ 托盘永不释放、补给仓被撑满、上游跟着停。
+
+本插件默认按【托盘空闲格数】排队（高级项 `PaletteSpaceGuard`，默认开）：只放行"还差的量装得进当前空闲格数"的订单，并按**最接近完成**的顺序喂 —— 一单结算释放空间，再喂下一单。代价是同时推进的订单变少，但每一单都能完成。被暂缓时会写一行 `[palette] 托盘空间不足，暂缓 …`（详细日志下）。
+
+若存档**已经卡死**（托盘被几单半成品占满、谁都凑不够格数结算），把托盘上的货清掉即可解锁（原版托盘本身有 999 格，正常情况下碰不到这种情况）。
+
+Urgent orders only settle once their whole batch sits on the palettes (source 97499), and the total palette space is the sum of every `TownPalette`'s size across `warehouse` and `warehouse_cellar` (97488). With several orders in flight the palettes fill up with half-finished batches, nobody ever reaches a full batch, nothing is released, the supply warehouse backs up and upstream production stalls with it.
+
+The plugin queues by free palette space (advanced `PaletteSpaceGuard`, on by default): only orders whose remaining amount fits the free space are released, closest-to-finished first, so one order settles and frees its space before the next is fed. Fewer orders run at a time, but each one completes. Deferrals are logged as `[palette] 托盘空间不足，暂缓 …` (verbose logging).
+
+If a save is **already stuck** (palettes packed with several half-finished batches), clear the palettes to unlock it - vanilla palettes hold 999 slots each, so this is rare.
+
 ### 一趟能搬多少 Trip capacity
 
 一箱补给是 `ItemSize.Big`、要占搬运工 2 格，而原版背包是硬编码 4 格，所以原版一趟最多 2 箱。本插件把【补给仓库交付站上】搬运僵尸的背包默认扩到 64 格（一趟最多 32 箱，够最大订单一次搬完）；填 4 即恢复原版。
@@ -58,8 +72,8 @@ A supply box is `ItemSize.Big` and takes 2 of the porter's slots, and the vanill
 领奖之后界面会**立刻刷新**（下一帧重绘订单窗口与选单窗口），所以刚交完的单当场就能再接，不用关窗重开。
 The window is refreshed immediately after you collect a reward (the orders window and the selection window are redrawn on the next frame), so an order you just finished can be accepted again right away - no need to close and reopen.
 
-槽位多于一行放不下时可按配置换行（`OrderSlotsPerRow`，默认不换行）。实现**不依赖 Unity 的布局组件**：停掉槽位容器的布局组与自适应、写死容器尺寸、自己算每格坐标，外观尺寸沿用原来的。
-When the slots no longer fit in one row they can wrap (advanced `OrderSlotsPerRow`, off by default). The implementation does not rely on Unity layout components: the container's layout group and size fitter are switched off, the container size is fixed and every cell position is computed directly, reusing the original cell size and spacing.
+槽位多于 2 个时**自动换行**：按画布可用宽度尽量多放、最多 6 个一排（想固定每行几个或彻底不换行，用高级项 `OrderSlotsPerRow`：0 = 自动（默认）、1 = 不换行、2 至 6 = 固定）。实现**不依赖 Unity 的布局组件**：停掉槽位容器的布局组与自适应、写死容器尺寸、自己算每格坐标，外观尺寸沿用原来的。
+Slots wrap automatically once there are more than 2: as many per row as the canvas width allows, up to 6 (advanced `OrderSlotsPerRow` overrides it: 0 = automatic, the default; 1 = no wrapping; 2 to 6 = fixed). The implementation does not rely on Unity layout components: the container's layout group and size fitter are switched off, the container size is fixed and every cell position is computed directly, reusing the original cell size and spacing.
 
 ## 作用范围 What it touches
 
@@ -115,6 +129,7 @@ The main config (`BepInEx\config\gk2.OrderOptimizer.cfg`) only exposes the user-
 | Orders | `ResetWeeklyOrderLock` | `false` | 解除【同一订单每周只能交一次】（默认关，保持原版）|
 | Orders | `OrderSlotsEnabled` | `false` | 是否接管槽位数量；`false` = 收回原版数量 |
 | Orders | `OrderSlots` | `2` | 槽位数量（2~12），仅在上一项为 `true` 时生效 |
+| Orders | `OrdersEveryDay` | `false` | vendor 天天可接订单：**直接解除"只有 day_pride 那天能接单"的原版限制**（粉笔板常开）+ 清掉"本周已完成"标记 ⇒ 哪天都能接、刚交完的单当天就能再接 |
 
 | Section | Key | Default | Notes |
 |---|---|---|---|
@@ -122,11 +137,12 @@ The main config (`BepInEx\config\gk2.OrderOptimizer.cfg`) only exposes the user-
 | General | `RequireFullBatch` | `true` | Whole-batch gate; `false` = ship whatever is available |
 | General | `PorterInventorySize` | `64` | Porter bag size (vanilla 4); only the porters of the supply-warehouse delivery station |
 | Orders | `ResetWeeklyOrderLock` | `false` | Lift the one-delivery-per-order-per-week limit (off by default) |
+| Orders | `OrdersEveryDay` | `false` | Vendors accept orders every day: removes the vanilla "pride day only" restriction (the chalk board is kept enabled) and clears the "finished this week" flag, so an order can be picked any day - and re-picked the same day it was paid |
 | Orders | `OrderSlotsEnabled` | `false` | Whether the slot count is managed; `false` shrinks back to the vanilla count |
 | Orders | `OrderSlots` | `2` | Slot count (2..12); only used when the key above is `true` |
 
-高级项藏在同目录的 `gk2.OrderOptimizer.advanced.cfg` 里（**不会自动生成**，删掉即用默认值）：`StockScope`（库存口径，默认 `StationZone` 只数补给仓库）、`UpdateIntervalSeconds`（默认 2 秒）、`OrderSlotsPerRow`（默认 0 = 不换行）、`RepeatNonRenewableOrders`（默认 false）、`VerboseLogging`（默认 false）。
-Advanced keys live in `gk2.OrderOptimizer.advanced.cfg` in the same folder (**not created automatically**; delete it to use defaults): `StockScope` (`StationZone` = count the supply warehouse only, the default), `UpdateIntervalSeconds` (default 2 s), `OrderSlotsPerRow` (default 0 = no wrapping), `RepeatNonRenewableOrders` (default false), `VerboseLogging` (default false).
+高级项藏在同目录的 `gk2.OrderOptimizer.advanced.cfg` 里（**不会自动生成**，删掉即用默认值）：`StockScope`（库存口径，默认 `StationZone` 只数补给仓库）、`UpdateIntervalSeconds`（默认 2 秒）、`OrderSlotsPerRow`（默认 0 = 按画布宽度自动换行、最多 6 个一排；1 = 不换行；2 至 6 = 固定）、`PaletteSpaceGuard`（默认 true = 按小镇托盘空闲格数排队）、`LoadingShelfSize`（**默认 40**；给**装货货架**按 4 格基准放大 —— t2 4→40、t1 2→20；填 0 = 关闭并还原成原版）、`RepeatNonRenewableOrders`（默认 false）、`VerboseLogging`（默认 false）。
+Advanced keys live in `gk2.OrderOptimizer.advanced.cfg` in the same folder (**not created automatically**; delete it to use defaults): `StockScope` (`StationZone` = count the supply warehouse only, the default), `UpdateIntervalSeconds` (default 2 s), `OrderSlotsPerRow` (default 0 = wrap automatically to the canvas width, up to 6 per row; 1 = no wrapping; 2 to 6 = fixed), `PaletteSpaceGuard` (on by default), `LoadingShelfSize` (**default 40**; scales the loading shelves from a 4-slot baseline - t2 4 to 40, t1 2 to 20; 0 turns it off and restores the vanilla sizes), `RepeatNonRenewableOrders` (default false), `VerboseLogging` (default false).
 
 ## 日志 Log lines
 
@@ -166,8 +182,10 @@ The game path defaults to `E:\SteamLibrary\steamapps\common\Graveyard Keeper 2`;
 - 跨区物流（Zombie Cross-Zone Logistics）读的是同一排开关、调的是同一个装货方法，所以两条装货路径都受同一道闸门约束，不会互相打架。| The cross-zone logistics mod reads the same toggles and calls the same loading method, so both loading paths pass the same gate and never fight.
 - 槽位数量写在存档里：`OrderSlotsEnabled` 从 `true` 改回 `false`（或把 `OrderSlots` 调小）会**真实删除**多出来的槽位，其上的订单被取消；若那单已交付但还没领奖，奖励会作废 —— 这种情况会打一行带 ⚠ 的日志明确提示，不会静默处理。| The slot list lives in your save: switching `OrderSlotsEnabled` back to `false` (or lowering `OrderSlots`) really removes the extra slots and cancels the orders that sat on them; if such an order was already delivered but not yet paid, its reward is forfeited - that case prints an explicit ⚠ log line instead of failing silently.
 - 游戏更新若重命名被挂钩的三个方法，对应功能会停止生效，但日志会明确写 `找不到 …`，不会静默出错。| If a game update renames one of the three patched methods, the matching feature stops working but logs a clear `找不到 …` line instead of failing silently.
+- **补给仓库的装货货架：画面只画 4 个箱子，但它实际能放下 40 个 —— 多出来的箱子只是不画出来，不会丢失**（已实测：存档来回之后箱子仍在，订单照常计数）。| The supply-warehouse loading shelves only DRAW 4 boxes but each shelf actually holds 40 - the extra boxes are simply not rendered on it, and nothing is lost (verified in game: they survive a save and reload and still count towards your orders).
+- 托盘空间是硬上限：紧急订单要【整批同时躺在托盘上】才结算（源码 97499），总格数 = warehouse + warehouse_cellar 里所有 TownPalette 的 `inventory_size` 之和（97488）。插件默认按空间排队（`PaletteSpaceGuard`，默认开 ⇒ 不会再死锁）；**已经卡死**的存档把托盘上的货清掉即可解锁。详细日志会打一行 `[palette] 小镇托盘：N 个容器，共 M 格（已用 X，空闲 Y）`，可以照着它判断同时接几单。| Palette space is a hard cap: urgent orders need their whole batch on the palettes at once (source 97499) and the total is the sum of every TownPalette's `inventory_size` in warehouse plus warehouse_cellar (97488). The plugin queues by space by default (`PaletteSpaceGuard`, on), so it no longer deadlocks; a save that is **already stuck** is unlocked by clearing the palettes. Verbose logging prints a `[palette]` line with the container/slot/used/free totals so you can judge how many orders to run at once.
 
 ## 状态 Status
 
-- 版本 v1.0.0，已验证：站点开关随订单开合、凑齐整批才发车、只装缺口量、两台交付站都被管辖、领奖后即时刷新、槽位数量与换行。
-- Version v1.0.0, verified: toggles follow orders, whole-batch gate, no overshipping, both delivery stations managed, instant refresh after collecting a reward, slot count and row wrapping.
+- 版本 v1.0.1，已验证：站点开关随订单开合、凑齐整批才发车、只装缺口量、两台交付站都被管辖、领奖后即时刷新、槽位数量与换行、**装货货架扩容（实测 8 架 32 格 → 320 格）**、订单天天可接（粉笔板保持开启）。
+- Version v1.0.1, verified: toggles follow orders, whole-batch gate, no overshipping, both delivery stations managed, instant refresh after collecting a reward, slot count and row wrapping, **loading shelves enlarged (measured: 8 shelves went 32 to 320 slots)**, orders accepted every day (chalk board kept enabled).

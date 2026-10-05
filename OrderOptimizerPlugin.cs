@@ -52,7 +52,7 @@ namespace OrderOptimizer
     {
         public const string PluginGuid = "gk2.OrderOptimizer";
         public const string PluginName = "GK2 OrderOptimizer";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.0.1";
 
         /// <summary>槽位数量上限（配置范围与内部 clamp 共用同一个值）。</summary>
         internal const int MaxOrderSlots = 12;
@@ -69,7 +69,10 @@ namespace OrderOptimizer
         internal static ConfigEntry<bool> ModEnabled;
         internal static ConfigEntry<bool> RequireFullBatch;
         internal static ConfigEntry<string> StockScope;
+        internal static ConfigEntry<bool> PaletteSpaceGuard;
+        internal static ConfigEntry<int> LoadingShelfSize;
         internal static ConfigEntry<bool> ResetWeeklyOrderLock;
+        internal static ConfigEntry<bool> OrdersEveryDay;
         internal static ConfigEntry<bool> OrderSlotsEnabled;
         internal static ConfigEntry<int> OrderSlots;
         internal static ConfigEntry<int> OrderSlotsPerRow;
@@ -116,6 +119,11 @@ namespace OrderOptimizer
 
         /// <summary>`[bag]` 明细是否已经打过（每会话一次 —— 那段每轮都会跑，不能每轮都打）。</summary>
         private static bool loggedBagSummary;
+
+        /// <summary>托盘容量诊断：第一行必打（不受详细日志开关影响），之后只在数字变化时追一行。</summary>
+        private static bool loggedTownPaletteSummary;
+        private static string lastPaletteTotalsSignature;
+        private static float lastPaletteTotalsLogTime = -999f;
 
         /// <summary>上一次 `[orders]` 缺口摘要的内容签名（只有内容变了才打，避免每轮刷屏）。</summary>
         private static string lastNeedsSignature;
@@ -215,6 +223,48 @@ namespace OrderOptimizer
                     "How often the accepted orders are checked and the station toggles refreshed, in seconds.",
                     new AcceptableValueRange<float>(0.5f, 60f)));
 
+            PaletteSpaceGuard = AdvancedConfig.Bind(
+                "Advanced",
+                "PaletteSpaceGuard",
+                true,
+                "默认开：订单要按【小镇托盘的空闲格数】排队发车。\n" +
+                "  背景：紧急订单要【整批同时躺在托盘上】才结算（源码 97499 —— 托盘现有量 >= 需求总量才推进），\n" +
+                "        而托盘总格数 = warehouse + warehouse_cellar 两区里所有 TownPalette 的格数之和（源码 97488）。\n" +
+                "  开着：只放行【还差的量装得进托盘空闲格数】的订单，并按【最接近完成】的顺序喂 —— 一单跑完释放空间，\n" +
+                "        再喂下一单。多张订单同时推进时不再互相挤爆托盘（那会让谁都凑不齐整批、补给仓被撑满、上游停）。\n" +
+                "  关掉：回到只看【凑齐整批】那一道闸门，不管托盘还剩多少空格。\n" +
+                "On by default: orders are queued against the free space of the town palettes.\n" +
+                "  Urgent orders only settle once their whole batch sits on the palettes (source 97499), and the\n" +
+                "  total palette space is the sum of every TownPalette's size across warehouse + warehouse_cellar\n" +
+                "  (source 97488). With this on, only orders whose remaining amount fits the free palette space\n" +
+                "  are released, closest-to-finished first, so several orders can no longer fill the palettes with\n" +
+                "  half-finished batches (which used to stall everything). Turn it off to go back to the plain\n" +
+                "  whole-batch gate.");
+
+            LoadingShelfSize = AdvancedConfig.Bind(
+                "Advanced",
+                "LoadingShelfSize",
+                40,
+                new ConfigDescription(
+                    "给【搬运工装货的货架】扩容（默认 40；填 0 = 关闭并还原成原版格数）。这批容器 = 交付站所在区域的 MultiInventoryWgoDatas，\n" +
+                    "也正是本 mod 数【凑齐整批】的同一批容器；原版 conveyor_storage_t1 只有 2 格、t2 只有 4 格\n" +
+                    "（定义表 wgoDefs.tsv），而订单要 5 至 30 箱同时备齐 ⇒ 判据永远不成立、开关永不打开、上游被顶停。\n" +
+                    "  比例规则（以原版 4 格为基准）：目标 = max(原版格数, min(该值, 原版格数 × 该值 / 4))。\n" +
+                    "  所以填 40 时：t2（4 格）→ 40、t1（2 格）→ 20 —— 升级到 t2 正好翻倍，符合直觉。\n" +
+                    "  原版就比目标大的容器一律【只增不减】（例如 999 格的箱子保持 999，绝不被缩小）。\n" +
+                    "  改回 0 会还原成定义表里的原版格数（只在容器里现有的东西放得下时才缩，不会丢货）。\n" +
+                    "Enlarges the shelves the porters load from (default 40; set it to 0 to turn it off and restore the\n" +
+                    "vanilla sizes). Those containers are the delivery station's zone (MultiInventoryWgoDatas) - the very\n" +
+                    "set the whole-batch check counts. In vanilla\n" +
+                    "conveyor_storage_t1 holds 2 slots and t2 holds 4 (see wgoDefs.tsv), while an order needs 5 to 30\n" +
+                    "boxes staged at once, so the gate can never open and upstream production stalls.\n" +
+                    "  Scaling rule (4 slots = baseline): target = max(vanilla, min(this value, vanilla * value / 4)).\n" +
+                    "  With 40 that gives t2 (4 slots) to 40 and t1 (2 slots) to 20 - upgrading to t2 doubles it.\n" +
+                    "  Containers already bigger than the target are never shrunk (a 999-slot crate stays 999).\n" +
+                    "Setting it back to 0 restores the data-defined sizes, and only once a shelf actually has room,\n" +
+                    "so nothing is ever lost.",
+                    new AcceptableValueRange<int>(0, 999)));
+
             ResetWeeklyOrderLock = Config.Bind(
                 "Orders",
                 "ResetWeeklyOrderLock",
@@ -227,6 +277,25 @@ namespace OrderOptimizer
                 "the pride day resets the flags (source 97546 / 97554). The released defaults change nothing.\n" +
                 "true: lift that limit - the finished-this-week flag is cleared the moment an order is completed,\n" +
                 "so renewable orders can be re-accepted and paid again right away.");
+
+            OrdersEveryDay = Config.Bind(
+                "Orders",
+                "OrdersEveryDay",
+                false,
+                "false（默认）：保持原版 —— 原版用两条**按天触发**的 GameLogic 卡死接单时机（定义表 gameLogicsDefs.tsv）：\n" +
+                "      enable_chalk_board  → day_pride 当天 1%  时把 chalk_board_enabled 设成 1；\n" +
+                "      disable_chalk_board → day_pride 当天 99% 时把它设回 0；\n" +
+                "      而接单判定要求 chalk_board_enabled > 0（源码 208885）⇒ 实际效果就是【只有那一天能接单】。\n" +
+                "true：**直接解除这道日期限制** —— 按游戏自己的写法把 chalk_board_enabled 一直保持为 1，哪天都能接单；\n" +
+                "      同时把订单上的\"本周已完成\"标记也清掉（领奖那一刻 + 每轮兜底），于是刚交完的单当天就能再接。\n" +
+                "      只影响【可再生】订单的重复接取；一次性订单仍需下面的 RepeatNonRenewableOrders。\n" +
+                "false (default): vanilla behaviour - two day-triggered game logics (gameLogicsDefs.tsv) set\n" +
+                "chalk_board_enabled to 1 at 1% of the pride day and back to 0 at 99% of it, while accepting an\n" +
+                "order requires chalk_board_enabled > 0 (source 208885) - so orders really are limited to that\n" +
+                "one day. true: that date restriction is removed - the chalk board is kept at 1 exactly the way\n" +
+                "the game itself sets it (source 248618), and the \"finished this week\" flag is cleared as well,\n" +
+                "so an order can be picked again the same day. Renewable orders only; one-off orders still need\n" +
+                "RepeatNonRenewableOrders.");
 
             OrderSlotsEnabled = Config.Bind(
                 "Orders",
@@ -264,11 +333,18 @@ namespace OrderOptimizer
                 "OrderSlotsPerRow",
                 0,
                 new ConfigDescription(
-                    "订单窗口一排放几个槽位（多于这个数就换行）。**0 = 不换行**（保持游戏原来的排列，默认）。\n" +
-                    "只在 OrderSlots > 2 时才有意义；原版 2 格的外观永远不动。\n" +
+                    "订单窗口一排放几个槽位（多于这个数就换行）。\n" +
+                    "  0（默认）= **自动**：按画布可用宽度尽量多放（最多 6 个一排），所以打开更多槽位就会自动换行，\n" +
+                    "              不用手填；\n" +
+                    "  1        = 不换行，保持游戏原来的排列（不接管排版）；\n" +
+                    "  2 至 6   = 固定每行几个。\n" +
+                    "只在槽位多于 2 个时才有意义；原版 2 格的外观永远不动。\n" +
                     "How many slots per row the orders window uses (extra ones wrap to the next row).\n" +
-                    "0 = no wrapping at all, keep whatever arrangement the game itself does (default).\n" +
-                    "Only meaningful when OrderSlots > 2; the vanilla 2-slot look is never touched.",
+                    "  0 (default) = automatic: as many as fit the canvas width, up to 6 per row - so enabling more\n" +
+                    "                slots wraps them by itself, nothing to configure;\n" +
+                    "  1           = no wrapping at all, keep whatever arrangement the game does;\n" +
+                    "  2 to 6      = fixed number per row.\n" +
+                    "Only meaningful when there are more than 2 slots; the vanilla 2-slot look is never touched.",
                     new AcceptableValueRange<int>(0, 6)));
 
             RepeatNonRenewableOrders = AdvancedConfig.Bind(
@@ -411,14 +487,21 @@ namespace OrderOptimizer
             if (!orderableItemsReady) BuildOrderableItemSet(balance);
             if (!orderableItemsReady) return;                                              // 平衡表还没好，下一轮再来
 
+            ReportTownPalettes(world);           // 托盘容量：第一行必打，之后数字变化时（详细日志）追一行
+            DumpTownContainers(world);           // 详细日志：一次性列出全世界所有 TownPalette 容器
+
             VendorSystem vendorSystem = MainGame.Instance.GameSave.vendorSystem;
             if (vendorSystem == null) return;
+
+            KeepChalkBoardEnabled();             // ★ OrdersEveryDay：解除"只有 day_pride 那天能接单"
 
             Dictionary<string, int> needed = CollectNeededByOrders(vendorSystem);
             if (needed.Count > 0)
             {
                 SubtractStockOnTownPalettes(world, needed);                                // 小镇托盘上已有的算已交付
             }
+
+            UpdatePaletteGuard(world, needed);   // ★ 托盘空间闸门：决定这一轮允许推进哪些订单
 
             // 库存按"区域"算（默认就是交付站所在区域 = 补给仓库），同一区域只算一遍
             Dictionary<WorldZoneData, Dictionary<string, int>> stockByZone =
@@ -488,7 +571,12 @@ namespace OrderOptimizer
                         // 装货条件（RequireFullBatch = true 时）：
                         //   还有东西没派出 且 基地里备齐了这批 —— 凑不够就一个都不搬（避免零散发货，
                         //   那种运输既拿不到好感奖励，还占着搬运工）。
-                        bool wanted = stillToSend > 0 && (!RequireFullBatch.Value || have >= stillToSend);
+                        // 托盘空间闸门（PaletteSpaceGuard）：这一单"还差的量"装不进托盘空闲格数就暂缓，
+                        // 先让别的单跑完、空间释放出来再继续（否则多张单会把托盘挤满半成品，谁都完不成）。
+                        bool paletteOk = PaletteAllowed(item.id);
+
+                        bool wanted = stillToSend > 0 && paletteOk
+                            && (!RequireFullBatch.Value || have >= stillToSend);
                         int desired = wanted ? 1 : 0;
 
                         if (station.GetGameResInt(item.id) == desired) continue;
@@ -511,6 +599,12 @@ namespace OrderOptimizer
                 Instance.Logger.LogInfo(
                     $"按订单更新了 {changed} 个箱种开关 / {changed} station toggle(s) aligned with accepted orders.");
             }
+
+            // 站点的收货/取货容器诊断放在站点循环**之后**：那时世界的容器名单肯定已经建好，
+            // 免得像 2026-10-05 那次一样，在世界还没就绪时先判一次、把 false 缓存进 TownStationCache。
+            DumpStationTargets(world, balance);                       // 详细日志：交付站的收货容器（含非托盘）
+            EnsureLoadingShelfSize(world, balance);                   // ★ 装货货架扩容（LoadingShelfSize，0 = 关闭）
+            DumpStationSources(world, balance);                       // 详细日志：取货容器（**扩容之后**再打，显示的是实际格数）
 
             EnsurePorterInventory(ManagedStationIds);                 // 只扩被管辖站上的搬运工
 
@@ -561,6 +655,357 @@ namespace OrderOptimizer
         }
 
         /// <summary>把小镇托盘上已有的同种货物从缺口里扣掉，避免重复发货。</summary>
+        private static bool dumpedTownContainers;
+
+        /// <summary>
+        /// 详细日志下打**一次**：把全世界所有 `interactionType == TownPalette` 的容器逐条列出来
+        /// （容器 id @ 区域 · 已用/格数）。
+        ///
+        /// 为什么需要：游戏结算（`TryResolveOrders` 97488）**只数 warehouse + warehouse_cellar 两个区域**里的托盘，
+        /// 而玩家在画面上看到的"托盘货架"可能属于别的区域或别的容器类型。这一行用来核实
+        /// "看得见的托盘"和"结算时数的托盘"是不是同一批 —— 对不上就得改统计范围。
+        /// 只打一次（世界建好、且确实找到容器之后），只在详细日志下。
+        /// </summary>
+        private static void DumpTownContainers(WorldData world)
+        {
+            if (!VerboseLog.Value || dumpedTownContainers || world == null) return;
+
+            List<GameSceneData> scenes = world.gameSceneDataList;
+            if (scenes == null) return;
+
+            List<string> found = new List<string>();
+            for (int s = 0; s < scenes.Count; s++)
+            {
+                GameSceneData scene = scenes[s];
+                if (scene == null || scene.worldZones == null) continue;
+
+                for (int z = 0; z < scene.worldZones.Count; z++)
+                {
+                    WorldZoneData zone = scene.worldZones[z];
+                    if (zone == null || zone.wgoDataList == null) continue;
+
+                    for (int i = 0; i < zone.wgoDataList.Count; i++)
+                    {
+                        WgoData wgo = world.GetWgoData(zone.wgoDataList[i]);
+                        if (wgo == null || wgo.Inventory == null || wgo.Inventory.Data == null) continue;
+                        if (!IsTownPalette(wgo)) continue;
+
+                        found.Add((wgo.Definition != null ? wgo.Definition.id : "?") + "@" + zone.id + " " +
+                                  wgo.Inventory.Data.InventoryFillSize + "/" + wgo.Inventory.Data.InventorySize);
+                    }
+                }
+            }
+
+            if (found.Count == 0) return;                 // 世界还没建好，下一轮再来
+            dumpedTownContainers = true;
+
+            Instance.Logger.LogInfo(
+                $"[palette] 全世界 TownPalette 容器共 {found.Count} 个（已用/格数）：{string.Join("、", found.ToArray())}" +
+                $" / every TownPalette container in the world (used/size)");
+        }
+
+        /// <summary>
+        /// 数一遍 warehouse + warehouse_cellar 里所有小镇托盘（TownPalette）的格数 / 已用 / 空闲，并汇报。
+        ///
+        /// 为什么需要：紧急订单（`isUrgent`）在游戏里要求**整批同时待在托盘上**才结算 ——
+        /// `VendorSystem.TryResolveOrders` 源码 97499：紧急单的待结算量 = (托盘现有量 >= 需求总量) ? 总量 : 0，
+        /// 而托盘总容量 = 两个区域里所有 TownPalette 的 inventory_size 之和（源码 97488 / 39888）。
+        /// 于是"托盘还能放多少箱"就是同时推进多个订单时的硬上限 —— 这一行把它变成看得见的数字。
+        ///
+        /// 打印时机：**第一行必打**（不受详细日志开关影响 —— 排查问题时最需要的就是它）；
+        /// 之后只在（容器数 / 格数 / 已用 / 空闲）任一变化时补一行，且只在 `VerboseLogging = true` 下。
+        /// 每轮（默认 2 秒）核对一次，开销只是遍历两个区域里的少数容器。
+        /// ※ 之前写成"只打一次"，于是它永远是**进存档那一刻**的快照（用户实测：接单前打的
+        ///   已用 0，后面送到托盘上的货完全没反映出来）—— 所以改成跟着数字变化走。
+        /// </summary>
+        private static void ReportTownPalettes(WorldData world)
+        {
+            int palettes = 0, slots = 0, free = 0, used = 0;
+            SumTownPalettes(world, "warehouse", ref palettes, ref slots, ref free, ref used);
+            SumTownPalettes(world, "warehouse_cellar", ref palettes, ref slots, ref free, ref used);
+
+            if (palettes == 0) return;                                   // 世界还没建好，下一轮再来
+
+            string signature = palettes + "|" + slots + "|" + used + "|" + free;
+            bool first = !loggedTownPaletteSummary;
+            if (!first && signature == lastPaletteTotalsSignature) return;
+
+            lastPaletteTotalsSignature = signature;
+            loggedTownPaletteSummary = true;
+
+            if (!first)
+            {
+                if (!VerboseLog.Value) return;                            // 后续变化：只在详细日志下追
+                float now = Time.realtimeSinceStartup;
+                if (now - lastPaletteTotalsLogTime < 2f) return;           // 连续到货时防抖
+                lastPaletteTotalsLogTime = now;
+            }
+
+            Instance.Logger.LogInfo(
+                $"[palette] 小镇托盘：{palettes} 个容器，共 {slots} 格（已用 {used}，空闲 {free}）" +
+                $" —— 紧急订单要整批同时躺在托盘上才结算，空闲格数决定同时能推进几单" +
+                $" / town palettes: {palettes} containers, {slots} slots ({used} used, {free} free)");
+        }
+
+        private static void SumTownPalettes(WorldData world, string zoneId,
+            ref int palettes, ref int slots, ref int free, ref int used)
+        {
+            WorldZoneData zone = world.GetWorldZoneDataById(zoneId);
+            if (zone == null || zone.wgoDataList == null) return;
+
+            for (int i = 0; i < zone.wgoDataList.Count; i++)
+            {
+                WgoData wgo = world.GetWgoData(zone.wgoDataList[i]);
+                if (wgo == null || wgo.Inventory == null || !IsTownPalette(wgo)) continue;
+
+                int size = wgo.Inventory.Data.InventorySize;
+                int fill = wgo.Inventory.Data.InventoryFillSize;
+
+                palettes++;
+                slots += size;
+                used += fill;
+                free += Mathf.Max(0, size - fill);
+            }
+        }
+
+        // ---------------------------------------------------------------- 托盘空间闸门（B）与托盘扩容（A）
+
+        /// <summary>这一轮被放行的订单箱种（托盘空间够装下）；`paletteGuardOn` 为 false 时全部放行。</summary>
+        private static readonly HashSet<string> paletteAllowed = new HashSet<string>(StringComparer.Ordinal);
+        private static bool paletteGuardOn;
+        private static string lastPaletteGuardSignature;
+
+        /// <summary>
+        /// 托盘空间闸门（高级项 `PaletteSpaceGuard`，默认开）—— 决定"这一轮允许推进哪些订单"。
+        ///
+        /// 为什么需要：紧急订单要【整批同时躺在托盘上】才结算（`TryResolveOrders` 源码 97499），
+        /// 托盘总格数又有限（97488）。多张订单同时发车时，托盘会被几张半成品分着占满 ⇒ 谁都凑不齐整批
+        /// ⇒ 托盘永不释放 ⇒ 补给仓被撑满、上游跟着停。所以这里按"还差的量"从小到大排队，
+        /// 只放行【装得进当前空闲格数】的那些 —— 先跑完最接近完成的单，它结算后释放空间，再喂下一单。
+        ///
+        /// 开销：每轮（默认 2 秒）算一次，遍历的是 warehouse + warehouse_cellar 里的托盘（数量很少）。
+        /// 装货层的 Prefix 只查这个缓存集合（不重算），所以最多晚一拍生效。
+        /// </summary>
+        private static void UpdatePaletteGuard(WorldData world, Dictionary<string, int> needed)
+        {
+            paletteGuardOn = false;
+            paletteAllowed.Clear();
+
+            if (!PaletteSpaceGuard.Value) return;                  // 关掉：完全不管托盘空间
+            if (world == null || needed.Count == 0) return;
+
+            paletteGuardOn = true;
+
+            int free = TownPaletteFreeSlots(world);
+            if (free <= 0) WarnPaletteFull();          // ⚠ 托盘满了：这行不受详细日志开关影响
+
+            // 按"还差多少"从小到大排队（相同则按箱种名，保证顺序稳定）；能装下就放行
+            List<KeyValuePair<string, int>> queue = new List<KeyValuePair<string, int>>(needed);
+            queue.Sort((a, b) => a.Value != b.Value
+                ? a.Value.CompareTo(b.Value)
+                : string.CompareOrdinal(a.Key, b.Key));
+
+            int budget = free;
+            for (int i = 0; i < queue.Count; i++)
+            {
+                int amount = queue[i].Value;
+                if (amount <= 0) continue;                         // 没缺口：本来就不会开
+                if (amount > budget) continue;                     // 装不下：这一轮暂缓，等空间释放
+                budget -= amount;
+                paletteAllowed.Add(queue[i].Key);
+            }
+
+            LogPaletteDeferred(needed, free);
+        }
+
+        /// <summary>这一轮是否允许装/发该箱种（闸门关闭时恒为 true）。</summary>
+        private static bool PaletteAllowed(string itemId)
+        {
+            if (!paletteGuardOn) return true;
+            return paletteAllowed.Contains(itemId);
+        }
+
+        /// <summary>小镇托盘当前的空闲格数（warehouse + warehouse_cellar 两区所有 TownPalette）。</summary>
+        private static int TownPaletteFreeSlots(WorldData world)
+        {
+            int palettes = 0, slots = 0, free = 0, used = 0;
+            SumTownPalettes(world, "warehouse", ref palettes, ref slots, ref free, ref used);
+            SumTownPalettes(world, "warehouse_cellar", ref palettes, ref slots, ref free, ref used);
+            return free;
+        }
+
+        /// <summary>
+        /// 有订单被托盘空间暂缓时打一行（详细日志；同一状态只打一次，避免每轮刷屏）。
+        /// 只写这一行、不动别的：让人一眼看出"不是 mod 卡了，是托盘满了在排队"。
+        /// </summary>
+        private static void LogPaletteDeferred(Dictionary<string, int> needed, int free)
+        {
+            if (!VerboseLog.Value) return;
+
+            List<string> deferred = new List<string>();
+            int deferredTotal = 0;
+
+            foreach (KeyValuePair<string, int> kv in needed)
+            {
+                if (kv.Value <= 0 || paletteAllowed.Contains(kv.Key)) continue;
+                deferred.Add(kv.Key + "(" + kv.Value + ")");
+                deferredTotal += kv.Value;
+            }
+
+            if (deferred.Count == 0)
+            {
+                lastPaletteGuardSignature = null;
+                return;
+            }
+
+            string signature = free + "|" + string.Join(",", deferred.ToArray());
+            if (signature == lastPaletteGuardSignature) return;
+            lastPaletteGuardSignature = signature;
+
+            Instance.Logger.LogInfo(
+                $"[palette] 托盘空间不足，暂缓 {deferred.Count} 种（共需 {deferredTotal} 格，当前空闲 {free}）：" +
+                $"{string.Join("、", deferred.ToArray())} —— 先跑完已放行的那几单，空间释放后自动继续" +
+                $" / deferred (need {deferredTotal} slots, {free} free): {string.Join(", ", deferred.ToArray())}");
+        }
+
+        private static float lastPaletteFullWarnTime = -9999f;
+
+        /// <summary>
+        /// 托盘一个空格都没有、而还有订单没送完时的 ⚠ 警告（**不受 `VerboseLogging` 影响**，5 分钟最多一行）。
+        ///
+        /// 为什么必须报出来：托盘上可能压着【没人订的旧货】—— 未接单的货**不会结算也不会消失**
+        /// （`TryResolveOrders` 97478 只遍历已接单），于是它们永久占位。这时任何订单都装不进托盘，
+        /// 空间闸门会一直暂缓 ⇒ 看起来像"mod 卡住了"，所以要让人一眼看见、自己去清托盘。
+        /// </summary>
+        private static void WarnPaletteFull()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now - lastPaletteFullWarnTime < 300f) return;      // 5 分钟最多一行，不刷屏
+            lastPaletteFullWarnTime = now;
+
+            Instance.Logger.LogWarning(
+                "[palette] ⚠ 小镇托盘已满（空闲 0 格），订单装不进去 —— 托盘上可能压着没人订的旧货" +
+                "（未接单的货不会结算也不会消失，会一直占位）。把托盘清一清就能继续。" +
+                " / town palettes are completely full: clear them to continue");
+        }
+
+        private static string lastShelfSizeSignature;
+
+        /// <summary>
+        /// 装货货架扩容（高级项 `LoadingShelfSize`，默认 0 = 关闭）。
+        ///
+        /// 目标容器 = 每个"往小镇送货"的交付站所在区域的 `MultiInventoryWgoDatas`
+        /// —— 也就是搬运工装货的来源、同时是本 mod "凑齐整批"判据数的同一批容器。
+        /// 原版 `conveyor_storage_t1` = 2 格、`t2` = 4 格（`wgoDefs.tsv` 实测），而订单要 5~30 箱同时备齐，
+        /// 于是判据永远不成立 ⇒ 开关永不打开 ⇒ 补给仓被撑满、上游停（N 网反馈的现象）。
+        ///
+        /// 比例规则（以原版 4 格为基准）：target = max(原版, min(该值, ceil(原版 × 该值 / 4)))。
+        ///   ⇒ 填 40 时：t2（4 格）→ 40 ✓、t1（2 格）→ 20 ✓（升级到 t2 正好翻倍）。
+        ///   ⇒ 原版比目标大的（999 格箱子等）保持不动 ✓ **绝不缩小** ✓。
+        /// 关闭时还原成定义表里的原版格数，同样只在容器里现有的东西放得下时才缩（不丢货）。
+        /// </summary>
+        private static void EnsureLoadingShelfSize(WorldData world, GameBalance balance)
+        {
+            if (world == null || balance == null) return;
+
+            int size = Mathf.Max(0, LoadingShelfSize.Value);
+
+            List<PorterStationDef> defs = balance.porterStationDefs;
+            if (defs == null) return;
+
+            Dictionary<string, int> resized = new Dictionary<string, int>(StringComparer.Ordinal);   // "id|目标" → 个数
+            Dictionary<string, int> restoredMap = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            for (int d = 0; d < defs.Count; d++)
+            {
+                PorterStationDef def = defs[d];
+                if (def == null || string.IsNullOrEmpty(def.id) || def.items == null) continue;
+                if (!IsTownDeliveryStation(world, def)) continue;
+
+                List<WgoData> stations = world.GetWgoDataList(def.id);
+                if (stations == null) continue;
+
+                for (int s = 0; s < stations.Count; s++)
+                {
+                    WgoData station = stations[s];
+                    if (station == null) continue;
+
+                    WorldZoneData zone = station.WorldZoneData;
+                    List<WgoData> containers = zone != null ? zone.MultiInventoryWgoDatas : null;
+                    if (containers == null) continue;
+
+                    for (int c = 0; c < containers.Count; c++)
+                    {
+                        WgoData wgo = containers[c];
+                        if (wgo == null || wgo.Inventory == null || wgo.Inventory.Data == null) continue;
+                        if (wgo.Definition == null) continue;
+
+                        int vanilla = wgo.Definition.inventorySize;
+                        int now = wgo.Inventory.Data.InventorySize;
+                        string id = !string.IsNullOrEmpty(wgo.Definition.id) ? wgo.Definition.id : "?";
+
+                        if (size <= 0)                                        // 关闭：还原成原版
+                        {
+                            if (now <= vanilla) continue;
+                            if (wgo.Inventory.Data.InventoryFillSize > vanilla) continue;   // 放不下就先不缩
+                            wgo.Inventory.Data.InventorySize = vanilla;
+                            CountUp(restoredMap, id + "|" + vanilla);
+                            continue;
+                        }
+
+                        int scaled = Mathf.CeilToInt(vanilla * (float)size / 4f);
+                        int target = Mathf.Max(vanilla, Mathf.Min(size, scaled));
+                        if (now >= target) continue;                          // 只扩不缩
+
+                        wgo.Inventory.Data.InventorySize = target;
+                        CountUp(resized, id + "|" + target);
+                    }
+                }
+            }
+
+            // 汇报：按"容器 id + 目标格数"归并计数 —— 同类货架有 8 个就写 t2 ×8 → 40，
+            // （之前用 HashSet 去重，8 个同类货架只会显示 1 条，看着像只改了一个）。
+            Dictionary<string, int> map = size > 0 ? resized : restoredMap;
+            List<string> keys = new List<string>(map.Keys);
+            keys.Sort(StringComparer.Ordinal);
+
+            string signature = size + "|" + keys.Count + "|" + string.Join(",", keys.ToArray());
+            if (signature == lastShelfSizeSignature) return;
+            lastShelfSizeSignature = signature;
+            if (keys.Count == 0) return;
+
+            int total = 0;
+            List<string> lines = new List<string>();
+            for (int i = 0; i < keys.Count; i++)
+            {
+                string[] parts = keys[i].Split('|');
+                int count = map[keys[i]];
+                total += count;
+                lines.Add(parts[0] + " ×" + count + " → " + parts[1]);
+            }
+
+            if (size > 0)
+            {
+                Instance.Logger.LogInfo(
+                    $"[shelf] 装货货架已扩容（LoadingShelfSize = {size}，共 {total} 个）：" +
+                    $"{string.Join("、", lines.ToArray())} / loading shelves enlarged");
+            }
+            else
+            {
+                Instance.Logger.LogInfo(
+                    $"[shelf] 装货货架已还原为原版格数（共 {total} 个）：{string.Join("、", lines.ToArray())}" +
+                    $" / loading shelves restored to the data-defined sizes");
+            }
+        }
+
+        /// <summary>把"某个 key"的计数 +1（日志归并用）。</summary>
+        private static void CountUp(Dictionary<string, int> map, string key)
+        {
+            int count;
+            map.TryGetValue(key, out count);
+            map[key] = count + 1;
+        }
+
         private static void SubtractStockOnTownPalettes(WorldData world, Dictionary<string, int> needed)
         {
             WorldZoneData warehouse = world.GetWorldZoneDataById("warehouse");
@@ -782,6 +1227,27 @@ namespace OrderOptimizer
             return sb.ToString();
         }
 
+        /// <summary>
+        /// 一行最多放几个槽位（`OrderSlotsPerRow = 0` 时用）：按**画布的可用宽度**算，最多 6 个一排。
+        ///
+        /// 为什么用画布宽度而不是窗口宽度：订单窗口在 `Redraw` 里会按内容尺寸自适应
+        /// （`RefreshContentFitter`，源码 209048），也就是说窗口宽度 = 我们刚写进去的容器宽度，
+        /// 拿它当基准会自我循环（越算越宽）。画布宽度才是"一排放不下就会跑出屏幕"的那条真实边界。
+        /// 用 90% 留一点边距；量不到就退回最多 4 个一排，宁可保守。
+        /// </summary>
+        private static int AutoColumns(UIVendorOrdersWindow window, Vector2 cell, float spacing, int cellCount)
+        {
+            float available = 0f;
+            RectTransform root = window != null ? window.transform.root as RectTransform : null;
+            if (root != null) available = root.rect.width * 0.9f;
+            if (available < 1f && root != null) available = root.sizeDelta.x * 0.9f;
+            if (available < 1f) return Mathf.Clamp(cellCount, 2, 4);
+
+            float step = Mathf.Max(1f, cell.x + spacing);
+            int fit = Mathf.FloorToInt((available + spacing) / step);
+            return Mathf.Clamp(fit, 2, Mathf.Min(6, Mathf.Max(2, cellCount)));
+        }
+
         private static void MaintainOrdersWindowLayout(string source)
         {
             if (VendorOrdersWidgetsField == null) return;
@@ -853,7 +1319,9 @@ namespace OrderOptimizer
 
             if (VerboseLog.Value) DumpOrdersWindowLayout(container, cells[0]);        // 每个会话一次
 
-            if (OrderSlotsPerRow.Value <= 1) return;                 // 0/1 = 不换行（不接管排版）
+            // OrderSlotsPerRow：0 = 自动（按画布宽度算列数，默认）、1 = 不接管排版、2 以上 = 固定列数
+            int perRowSetting = Mathf.Max(0, OrderSlotsPerRow.Value);
+            if (perRowSetting == 1) return;                           // 1 = 不换行（不接管排版）
             // 判断依据用"实际显示出来的槽位数"，而不是配置值：
             // 槽位是只增不减的（存档里可能还留着 12 个），配置降回 2 也不该让这些槽位挤成一行。
             if (cells.Count <= 2) return;                             // 原版 2 格：外观不动
@@ -889,8 +1357,10 @@ namespace OrderOptimizer
             ContentSizeFitter fitter = container.GetComponent<ContentSizeFitter>();
             if (fitter != null && fitter.enabled) fitter.enabled = false;
 
-            int perRow = Mathf.Clamp(OrderSlotsPerRow.Value, 2, cells.Count);   // 上限也按实际槽位数
-            int columns = Mathf.Min(perRow, cells.Count);
+            // 0 = 自动（按画布宽度算）；2 至 6 = 固定列数，上限也按实际槽位数
+            int columns = perRowSetting == 0
+                ? AutoColumns(window, cell, spacing, cells.Count)
+                : Mathf.Clamp(perRowSetting, 2, cells.Count);
             int rows = (cells.Count + columns - 1) / columns;
 
             Vector2 containerSize = new Vector2(
@@ -1014,6 +1484,46 @@ namespace OrderOptimizer
             }
         }
 
+        private static bool loggedChalkBoardForced;
+
+        /// <summary>
+        /// ★「vendor 天天可接订单」的**第一道闸门**：游戏的"粉笔板"开关 `chalk_board_enabled`。
+        ///
+        /// 原版用两条**按天触发**的 GameLogic 卡死接单时机（`gameLogicsDefs.tsv`）：
+        ///     enable_chalk_board   → day_pride 当天 1%  时 SetPPar("chalk_board_enabled", 1)
+        ///     disable_chalk_board  → day_pride 当天 99% 时 SetPPar("chalk_board_enabled", 0)
+        /// 而接单判定（源码 208885）要求 `chalk_board_enabled > 0`
+        ///   ⇒ 原版实际效果就是【只有 day_pride 那一天能接单】。
+        ///
+        /// 这里按游戏自己的写法把它一直保持为 1（游戏自己就是这么设的，源码 248618：
+        /// `MainGame.PlayerData.SetRes("chalk_board_enabled", 1f)`）—— 于是那道日期限制被直接解除，
+        /// 哪天都能接单。值已经是 1 就不写（避免每轮无效写入）。
+        /// </summary>
+        private static void KeepChalkBoardEnabled()
+        {
+            if (!OrdersEveryDay.Value) return;
+
+            try
+            {
+                if (MainGame.PlayerData == null) return;
+                if (MainGame.PlayerData.GetResInt("chalk_board_enabled") > 0) return;   // 开着就不写
+
+                MainGame.PlayerData.SetRes("chalk_board_enabled", 1f);
+
+                if (!loggedChalkBoardForced)
+                {
+                    loggedChalkBoardForced = true;
+                    Instance.Logger.LogInfo(
+                        "[orders] 已解除\"只有 day_pride 那天能接单\"的限制：粉笔板保持开启（OrdersEveryDay）" +
+                        " / chalk board kept enabled - orders can be accepted any day");
+                }
+            }
+            catch (Exception e)
+            {
+                LogErrorThrottled(e);
+            }
+        }
+
         /// <summary>
         /// 订单系统本身的两件事（与交付站开关无关）：
         ///   1) 每周限制 —— 把还带着"本周已完成"标记的订单清零。正常情况下 `Patch_NoWeeklyLock`
@@ -1029,9 +1539,10 @@ namespace OrderOptimizer
         {
             bool resetWeekly = ResetWeeklyOrderLock.Value;
             bool repeatOnce = RepeatNonRenewableOrders.Value;
+            bool everyDay = OrdersEveryDay.Value;      // vendor 天天可接订单：把"本周已完成"标记直接清掉
 
             List<Vendor> vendors = vendorSystem.vendors;
-            if (vendors != null && (resetWeekly || repeatOnce))
+            if (vendors != null && (resetWeekly || repeatOnce || everyDay))
             {
                 int clearedWeekly = 0;
                 int reopened = 0;
@@ -1046,7 +1557,7 @@ namespace OrderOptimizer
                         VendorOrderData order = vendor.Orders[o];
                         if (order == null) continue;
 
-                        if (resetWeekly && order.IsFinishedThisWeek)
+                        if ((resetWeekly || everyDay) && order.IsFinishedThisWeek)
                         {
                             order.ResetFinishedThisWeek();
                             clearedWeekly++;
@@ -1068,7 +1579,7 @@ namespace OrderOptimizer
                 if (clearedWeekly > 0 || reopened > 0)
                 {
                     Instance.Logger.LogInfo(
-                        $"订单每周限制已解除：清除本周标记 {clearedWeekly} 个、重新开放一次性订单 {reopened} 个" +
+                        $"订单可接状态已刷新（ResetWeeklyOrderLock / OrdersEveryDay）：清除本周标记 {clearedWeekly} 个、重新开放一次性订单 {reopened} 个" +
                         $" / weekly flags cleared {clearedWeekly}, one-off orders reopened {reopened}");
                 }
             }
@@ -1395,21 +1906,25 @@ namespace OrderOptimizer
             if (TownStationCache.TryGetValue(def.id, out cached)) return cached;
 
             bool result = false;
+            bool looked = false;             // 是否真的看到了可判断的数据（容器名单已建好）
 
             List<string> customTargets = def.customTargets;
             if (customTargets != null && customTargets.Count > 0)
             {
                 for (int i = 0; i < customTargets.Count && !result; i++)
                 {
-                    result = IsTownPalette(world.GetWgoData(customTargets[i]));
+                    WgoData wgo = world.GetWgoData(customTargets[i]);
+                    if (wgo != null) looked = true;
+                    result = IsTownPalette(wgo);
                 }
             }
 
             if (!result && !string.IsNullOrEmpty(def.targetWorldZone))
             {
                 WorldZoneData zone = world.GetWorldZoneDataById(def.targetWorldZone);
-                if (zone != null && zone.wgoDataList != null)
+                if (zone != null && zone.wgoDataList != null && zone.wgoDataList.Count > 0)
                 {
+                    looked = true;
                     for (int i = 0; i < zone.wgoDataList.Count && !result; i++)
                     {
                         result = IsTownPalette(world.GetWgoData(zone.wgoDataList[i]));
@@ -1417,7 +1932,9 @@ namespace OrderOptimizer
                 }
             }
 
-            TownStationCache[def.id] = result;
+            // ★ 只在"确实看到过数据"时缓存 —— 否则会把"世界还没建好"的 false 永久记住，
+            //   之后这局的站点就全被当成非交付站、开关再也不被接管（2026-10-05 实测踩到过）。
+            if (result || looked) TownStationCache[def.id] = result;
             return result;
         }
 
@@ -1425,6 +1942,167 @@ namespace OrderOptimizer
         {
             return wgo != null && wgo.Definition != null &&
                    wgo.Definition.interactionType == WGODef.InteractionType.TownPalette;
+        }
+
+        private static bool dumpedStationSources;
+
+        /// <summary>
+        /// 详细日志下打一次：每个"往小镇送货"的交付站，它的**取货容器**（补给仓库里那批货架）——
+        /// 也就是 `WorldZoneData.MultiInventoryWgoDatas`（搬运工装货时遍历的那张名单，源码 121859 / 39718）。
+        ///
+        /// 为什么关键：本 mod 的"凑齐整批"判据数的就是这批容器（`StockScope = StationZone` 时走 `StockFor`）。
+        /// 如果它们每个只有几格（玩家看到的"很多货架、每架 4 格"），那么"整批同时备齐"就受限于它们的
+        /// **空闲格数** —— 多张订单一起排队时谁都不够格数 ⇒ 开关永不打开 ⇒ 补给仓被撑满、上游被顶停。
+        /// 这一行把容器数 / 合计格数 / 已用 / 空闲量出来，正好对得上 N 网反馈里"每个托盘只能放 4 个"的说法。
+        /// </summary>
+        private static void DumpStationSources(WorldData world, GameBalance balance)
+        {
+            if (!VerboseLog.Value || dumpedStationSources || world == null || balance == null) return;
+
+            List<PorterStationDef> defs = balance.porterStationDefs;
+            if (defs == null) return;
+
+            List<string> report = new List<string>();
+            bool saw = false;
+
+            for (int d = 0; d < defs.Count; d++)
+            {
+                PorterStationDef def = defs[d];
+                if (def == null || string.IsNullOrEmpty(def.id) || def.items == null) continue;
+                if (!IsTownDeliveryStation(world, def)) continue;
+
+                List<WgoData> stations = world.GetWgoDataList(def.id);
+                if (stations == null || stations.Count == 0) continue;
+
+                for (int s = 0; s < stations.Count; s++)
+                {
+                    WgoData station = stations[s];
+                    if (station == null) continue;
+
+                    WorldZoneData zone = station.WorldZoneData;
+                    List<WgoData> containers = zone != null ? zone.MultiInventoryWgoDatas : null;
+                    if (containers == null) continue;
+
+                    saw = true;
+
+                    int slots = 0, used = 0, listed = 0;
+                    List<string> lines = new List<string>();
+
+                    for (int c = 0; c < containers.Count; c++)
+                    {
+                        WgoData wgo = containers[c];
+                        if (wgo == null || wgo.Inventory == null || wgo.Inventory.Data == null) continue;
+
+                        int size = wgo.Inventory.Data.InventorySize;
+                        int fill = wgo.Inventory.Data.InventoryFillSize;
+                        slots += size;
+                        used += fill;
+
+                        if (listed < 20)
+                        {
+                            lines.Add((wgo.Definition != null ? wgo.Definition.id : "?") + " " + fill + "/" + size);
+                            listed++;
+                        }
+                    }
+
+                    report.Add(def.id + "#" + station.UniqueId.Guid.ToString("N").Substring(0, 4) +
+                               "@" + (zone != null ? zone.id : "?") + "：取货容器 " + containers.Count +
+                               " 个、合计 " + slots + " 格（已用 " + used + "、空闲 " + Mathf.Max(0, slots - used) + "）" +
+                               (containers.Count > listed ? "（只列前 " + listed + " 个）" : "") +
+                               "：" + string.Join("、", lines.ToArray()));
+                }
+            }
+
+            if (!saw) return;                        // 世界 / 站点还没建好，下一轮再来
+            dumpedStationSources = true;
+
+            for (int i = 0; i < report.Count; i++)
+            {
+                Instance.Logger.LogInfo("[stock] 交付站取货容器 / loading sources: " + report[i]);
+            }
+        }
+
+        private static bool dumpedStationTargets;
+
+        /// <summary>
+        /// 详细日志下一次：每个"往小镇送货"的交付站，货到底会倒进哪些容器。
+        ///
+        /// 为什么关键：搬运工卸货走的是 `TryAddItemPreferringSameItem(multiInventory.inventoryList, item)`
+        /// （源码 121689 / 121869）—— 它会在目标区 / `customTargets` 里**任意**有空位的容器中挑一个
+        /// （只有"优先放已有同种物品的容器"这一条软偏好），而游戏结算只数
+        /// warehouse + warehouse_cellar 里的 **TownPalette**（97488）。
+        /// 两者一旦不是同一批容器，就会出现"货明明送出去了、订单却永远凑不齐"的假死锁 —— 正是要排查的情况。
+        /// 输出里 `★托盘` 标记结算认的容器；只列托盘与**非空**容器，避免刷屏。
+        /// </summary>
+        private static void DumpStationTargets(WorldData world, GameBalance balance)
+        {
+            if (!VerboseLog.Value || dumpedStationTargets || world == null || balance == null) return;
+
+            List<PorterStationDef> defs = balance.porterStationDefs;
+            if (defs == null) return;
+
+            List<string> report = new List<string>();
+            bool sawStation = false;
+
+            for (int d = 0; d < defs.Count; d++)
+            {
+                PorterStationDef def = defs[d];
+                if (def == null || string.IsNullOrEmpty(def.id) || def.items == null) continue;
+                if (!IsTownDeliveryStation(world, def)) continue;
+
+                sawStation = true;
+
+                List<string> containers = new List<string>();
+                List<string> custom = def.customTargets;
+
+                if (custom != null)
+                {
+                    for (int i = 0; i < custom.Count; i++)
+                    {
+                        AddContainerLine(containers, world.GetWgoData(custom[i]));
+                    }
+                }
+
+                WorldZoneData zone = !string.IsNullOrEmpty(def.targetWorldZone)
+                    ? world.GetWorldZoneDataById(def.targetWorldZone) : null;
+                if (zone != null && zone.wgoDataList != null)
+                {
+                    for (int i = 0; i < zone.wgoDataList.Count; i++)
+                    {
+                        AddContainerLine(containers, world.GetWgoData(zone.wgoDataList[i]));
+                    }
+                }
+
+                string where = (custom != null && custom.Count > 0 ? "customTargets" : "targetWorldZone") +
+                               "=" + (!string.IsNullOrEmpty(def.targetWorldZone) ? def.targetWorldZone : "?");
+
+                report.Add(def.id + "（" + where + "）：" +
+                           (containers.Count > 0 ? string.Join("、", containers.ToArray()) : "（没有可列出的容器）"));
+            }
+
+            if (!sawStation) return;                 // 世界 / 站点还没建好，下一轮再来
+            dumpedStationTargets = true;
+
+            for (int i = 0; i < report.Count; i++)
+            {
+                Instance.Logger.LogInfo("[palette] 交付站收货容器 / delivery targets: " + report[i]);
+            }
+        }
+
+        /// <summary>把容器描述加进列表：只收托盘与**非空**容器（其余没信息量，只会刷屏）。</summary>
+        private static void AddContainerLine(List<string> lines, WgoData wgo)
+        {
+            if (wgo == null || wgo.Inventory == null || wgo.Inventory.Data == null) return;
+
+            int size = wgo.Inventory.Data.InventorySize;
+            int fill = wgo.Inventory.Data.InventoryFillSize;
+            bool palette = IsTownPalette(wgo);
+            if (!palette && fill <= 0) return;                        // 非托盘且空 → 跳过
+
+            WorldZoneData zone = wgo.WorldZoneData;
+            lines.Add((wgo.Definition != null ? wgo.Definition.id : "?") +
+                      "@" + (zone != null ? zone.id : "?") + " " + fill + "/" + size +
+                      (palette ? " ★托盘" : ""));
         }
 
         /// <summary>给详细日志用的一行摘要：每单还差多少、基地里备了多少。</summary>
@@ -1479,7 +2157,12 @@ namespace OrderOptimizer
             {
                 try
                 {
-                    if (!ModEnabled.Value || !ResetWeeklyOrderLock.Value) return;
+                    if (!ModEnabled.Value) return;
+                    // 两个开关任一打开，都在"领奖那一刻"就把标记清掉：
+                    //   ResetWeeklyOrderLock = 解禁每周限制（交完可再交）
+                    //   OrdersEveryDay       = vendor 天天可接订单（交完当天可再接）
+                    // 两者的闸门是同一个标记（源码 208885），所以共用这段清除逻辑。
+                    if (!ResetWeeklyOrderLock.Value && !OrdersEveryDay.Value) return;
                     __instance.ResetFinishedThisWeek();
 
                     // 此刻界面里那份"订单列表"还是旧状态（刚画的、灰的），下一帧强制重绘一次，
@@ -1567,6 +2250,10 @@ namespace OrderOptimizer
                     // ★ 整批没齐也不装：堵住"手动把开关点开 → 零散发货"这条路。
                     // 装不上货 ⇒ 原版 121597 的「背包非空才发车」不成立 ⇒ 依旧不发车。
                     if (!BatchReady(__instance, cur.id, need, carried)) return false;
+
+                    // ★ 托盘空间闸门（第三道）：这一单装不进托盘空位就先别装 —— 装了也是搬运工背着货
+                    //   卸不下去（原版 121689：托盘放不进就留在背包里），还白占补给仓、把上游顶停。
+                    if (!PaletteAllowed(cur.id)) return false;
 
                     budgetItemId = cur.id;
                     budgetTotalAllowed = need;                            // ★ 裁的时候按"总共该带"算

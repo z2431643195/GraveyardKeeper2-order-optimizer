@@ -1,0 +1,124 @@
+Order Optimizer / 订单系统优化
+
+Graveyard Keeper 2 的小镇订单优化 mod：交付站只送你真的接了的订单，而且凑齐整批才发车。
+不再有库存就无脑发货，也不再把上游原料白白变成没人要的箱子。
+Keeps the town delivery porter stations of Graveyard Keeper 2 shipping only what your accepted
+orders actually need, and only once the whole amount is ready.
+
+
+【原版的问题 The problem】
+原版搬运站装什么货，只看站点界面上那排逐项开关，完全不看订单。只要开关开着，没人订的箱子也会一直往
+小镇送，上游原料就这样被吃掉了。
+Vanilla: what a station loads depends only on the per-item toggles in its own window and never on
+your orders. As long as a toggle is on, boxes nobody ordered keep going to town.
+
+
+【这个 mod 做什么 What it does】
+每 2 秒按已接订单刷新交付站的那排开关：
+  缺口 等于 订单要的数量 减 已经交付的数量 减 小镇托盘上已有的数量。
+紧急订单按整批算，因为游戏只在一整批到齐的时候才结算。
+只有缺口大于 0 的箱种会被打开，其余一律关闭。
+The station toggles are refreshed from your accepted orders every 2 seconds. The gap equals what the
+order needs minus what is already delivered minus what already sits on the town palettes. Urgent
+orders count as one whole batch.
+
+一箱补给是 Big 物品、占搬运工 2 格，而原版背包只有 4 格，所以原版一趟最多只能搬 2 箱。
+本 mod 默认把被管辖站上的搬运工背包扩到 64 格，等于一趟 32 箱，最大的订单也能一次搬完。
+A supply box is a Big item and takes 2 bag slots, while the vanilla porter bag holds only 4 slots -
+2 boxes per trip. The mod expands porters of the managed stations to 64 slots, so one trip carries
+up to 32 boxes and even the biggest order goes out in a single run.
+
+
+【凑齐整批才发车 Only start once the whole amount is ready】
+默认设置下，只有当交付站所在的补给仓库里已经备齐这一单还需要的数量时才会允许装货；不够就一个都不搬，
+所以每一单都一定能完成、拿到好感奖励，不会再出现送一半、白跑一趟的情况。
+这条规则有两道闸门：除了站点的箱种开关，装货那一步还会再判一次。就算你在站点界面手动把开关点开，
+只要这批没凑齐就装不上车，所以不会零散发货。
+而且每一趟只会装这一单还差的数量，不会顺手把多余的箱子一起搬过去。
+By default a station only starts loading once the supply warehouse of that station holds the whole
+amount the order still needs. Below that nothing is moved, so every accepted order is guaranteed to
+complete and pay its happiness reward instead of being delivered in useless dribbles. The rule has
+two gates: the per-item switches of the station and the loading step itself, so flipping a switch by
+hand cannot defeat it. Each trip also loads only the amount the order still needs.
+
+多张订单同时进行时也不会互相卡死：mod 会按小镇托盘剩余的空间排队，只放行装得下的订单，并优先跑
+最接近完成的那一单 —— 一单结算释放空间，再喂下一单。
+With several orders in flight they are queued against the free space of the town palettes: only orders
+whose remaining amount fits are released, closest-to-finished first - one order settles and frees its
+room before the next is fed.
+
+补给仓库的装货货架也一并照顾到了：原版每架只有 2 至 4 格，根本塞不下 5 至 30 箱的一整批，这正是
+多种订单同时进行时会卡死的根源。本 mod 默认把每架按原版 4 格的基准等比放大（4 格变 40、2 格变 20），
+于是整批能同时备齐，订单就能正常发车。
+The loading shelves in the supply warehouse are taken care of as well: the vanilla ones hold only 2 to
+4 boxes, far too little for a whole batch of 5 to 30 boxes - that is what used to stall multiple
+orders. By default every shelf is scaled from the vanilla 4-slot baseline (4 becomes 40, 2 becomes
+20), so a whole batch fits and the order can leave.
+
+
+【订单面板增强 Order-window features（可选，默认关闭）】
+- 解除【同一个订单每周只能交一次】：完成那一刻就清掉标记，可再生订单交完马上能再接、再交、再拿奖励。
+- 订单窗口槽位数量可调（2 至 12 个），并且多于一行时会自动换行，不用自己去填排版参数。
+- 交完订单、点掉奖励之后，订单窗口会立刻刷新，刚交完的那一单当场就能再接，不用关窗重开。
+- Optional: lift the one-delivery-per-order-per-week limit; grow or shrink the order slot count (2 to
+  12) with automatic row wrapping; and the order window refreshes the moment a reward is collected,
+  so a freshly finished order can be accepted again without closing and reopening the window.
+
+
+【作用范围 What it touches】
+- 只碰【往小镇送货】的那种搬运站：目的地里有小镇托盘的站会被自动识别，矿场、采石场、葡萄园、
+  锯木厂、货运电梯等站点一律不动。
+- 只接管订单目录里出现过的箱种（22 种补给箱）。矿石、石料、木材、农作物这类非订单物品永远不会被碰。
+- 不会替你接单，也不会替你领取奖励。
+- 与其它物流 mod 共存良好：装货开关是游戏自己的那套数据，别的 mod 只要尊重它就不会打架。
+- Only stations that ship to town are touched: the ones whose destinations contain a town palette are
+  detected automatically. Mine, quarry, vineyard, sawmill and cargo-lift stations are never modified.
+- Only the box types that appear in the order catalogue (22 supply boxes) are managed. Ore, stone,
+  wood, crops and other non-order goods are never touched.
+- The mod never accepts an order for you and never collects a reward for you.
+- It coexists with other logistics mods: the toggles are the game's own data, so any mod that
+  respects them keeps working.
+
+
+【安装 Installation】
+1. 装好 BepInEx 5.4.23.5（Unity Mono 版），游戏目录内应有 winhttp.dll 与 BepInEx 文件夹。
+2. 把 OrderOptimizer.dll 放进游戏目录的 BepInEx\plugins\ 文件夹。
+3. 启动一次游戏，配置文件会自动生成：BepInEx\config\gk2.OrderOptimizer.cfg
+4. 改完配置保存，重启游戏生效。卸载只需删掉那个 dll，存档不受影响。
+1. Install BepInEx 5.4.23.5 (Unity Mono). winhttp.dll and the BepInEx folder should live next to
+   the game executable.
+2. Put OrderOptimizer.dll into the BepInEx\plugins\ folder of your game folder.
+3. Launch the game once and the config file is created automatically:
+   BepInEx\config\gk2.OrderOptimizer.cfg
+4. Edit it, save, then restart the game. To uninstall just delete the DLL; saves are not touched.
+
+
+【配置 Configuration】
+  Enabled                总开关，默认开。关掉即完全停手，恢复原版纯手动。
+  RequireFullBatch       默认开：凑齐整批才发车，保证拿到好感奖励。改成 false 就是有多少送多少。
+  PorterInventorySize    搬运工背包格数，默认 64（原版 4）。64 格等于一趟最多 32 箱。
+  ResetWeeklyOrderLock   默认关。改成 true 即解除"同一订单每周只能交一次"。
+  OrderSlotsEnabled      默认关。true 才接管订单窗口的槽位数量。
+  OrderSlots             槽位数量，默认 2（原版），可调 2 至 12；仅在上一项开启时生效。
+  Master switch Enabled (on), RequireFullBatch (on), PorterInventorySize (64), plus the optional
+  order-window entries ResetWeeklyOrderLock, OrderSlotsEnabled and OrderSlots - all off by default.
+
+
+【已知注意 Notes】
+- 默认只数补给仓库：箱子要放在交付站所在的那个区域里才凑得齐整批。
+- 补给仓库的装货货架：画面只会画 4 个箱子，但它实际能放下 40 个 —— 多出来的箱子只是不画出来，
+  不会丢失（已实测确认：存档来回之后箱子仍然在，订单照常计数）。
+- 槽位数量写进存档：调小是不可逆的删除，调回来只会得到空槽位。
+- 只在游戏版本 v1.006 上做过验证。
+- By default stock is counted in the supply warehouse only: keep the boxes inside the area the
+  delivery station belongs to.
+- The supply-warehouse loading shelves only DRAW 4 boxes, but each shelf actually holds 40 - the extra
+  boxes are simply not rendered on it and nothing is lost (verified in game: they survive saving and
+  reloading and still count towards your orders).
+- The order slot count is stored in your save: lowering it really deletes slots, and raising it back
+  only gives you empty ones.
+- Tested on game version v1.006.
+
+
+【源码 Source】
+https://github.com/z2431643195/GraveyardKeeper2-order-optimizer

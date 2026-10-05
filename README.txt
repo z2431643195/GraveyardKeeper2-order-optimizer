@@ -42,6 +42,22 @@ This rule has two gates: besides the per-item switches of the station, the loadi
 again. Even if you flip a switch on by hand, nothing gets loaded until the whole batch is ready, so
 the goods can never leave in useless dribbles.
 
+同时接多张订单时，本 mod 会按【小镇托盘还剩多少空格】排队发车：紧急订单要整批同时躺在托盘上才
+结算（游戏源码 97499），而托盘格数有限，所以只放行"还差的量装得下"的订单，并优先跑最接近完成的
+那一单 —— 一单结算释放空间，再喂下一单。这样同时跑的订单会少一些，但每一单都一定能完成，不会再
+出现"几张半成品把托盘占满、谁都凑不齐、生产全停"的情况。
+With several orders in flight the mod queues them against the free space of the town palettes: urgent
+orders only settle once their whole batch sits on the palettes (game source 97499) and that space is
+limited, so only orders whose remaining amount fits are released, closest-to-finished first - one order
+settles and frees its room before the next is fed. Fewer orders run at a time, but each one completes,
+and several half-finished batches can no longer fill the palettes and stall everything.
+
+补给仓库的装货货架：画面只会画 4 个箱子，但它实际能放下 40 个 —— 多出来的箱子只是**不画出来**，
+不会丢失（已实测确认：存档来回之后箱子仍然在，订单照常计数）。
+The supply-warehouse loading shelves only DRAW 4 boxes, but each shelf actually holds 40 - the extra boxes
+are simply not rendered on it, and nothing is lost (verified in game: they survive saving and reloading and
+still count towards your orders).
+
 并且每一趟只会装【这一单还差的数量】，不会顺手把多余的也搬过去。
 And each trip only loads the amount the order still needs - it never sends extra boxes along.
 
@@ -94,15 +110,16 @@ renewable orders can be accepted and paid again right away.
     这就是"把 12 格退回 2 格"的路径。
   · true  = 按 OrderSlots（2 至 12）管理：多于目标就加空槽、少于目标就收回，同样会取消被收掉槽位上的订单。
   · 槽位数量写在存档里，所以"收回"是真实删除，再加回来也只是空槽位。
-槽位多于一排放得下时，mod 会让它自动换行（OrderSlotsPerRow，默认 0 = 不换行），沿用原来的格子尺寸和
-间距，所以不会挤变形。
+槽位多于 2 个时 mod 会让它**自动换行**：按画布可用宽度尽量多放、最多 6 个一排，沿用原来的格子尺寸和
+间距，所以不会挤变形。（想固定每行几个、或彻底不换行，见下面高级配置里的 OrderSlotsPerRow。）
 The slot count (2 in vanilla) can be changed both ways, controlled by OrderSlotsEnabled (false by
 default): false shrinks the slots back to the vanilla number, removing the extras - and any order
 sitting in a removed slot is cancelled (the slot is cleared and the order becomes acceptable again;
 goods already shipped to town stay on the palettes and still count). true follows OrderSlots (2..12),
-growing and shrinking to that number with the same cancellation rule. When the slots no longer fit in
-one row the mod wraps them (OrderSlotsPerRow, 0 = off by default) while keeping the original cell size
-and spacing.
+growing and shrinking to that number with the same cancellation rule. More than 2 slots wrap
+automatically: as many per row as the canvas width allows, up to 6, keeping the original cell size
+and spacing. (To pin the number per row or switch wrapping off, see OrderSlotsPerRow in the advanced
+config further below.)
 
 另外，交完订单、点掉奖励之后，界面会立刻刷新 —— 刚刚交的那条订单马上就能再接，不用关掉窗口再打开。
 On top of that, the window is refreshed right after you collect an order reward, so the order you just
@@ -145,6 +162,20 @@ folder:
                          Off by default (vanilla weekly limit). Set it to true to remove the
                          one-delivery-per-order-per-week limit.
 
+  OrdersEveryDay         默认关（保持原版）。改成 true 即**直接解除"只有 day_pride 那天能接单"的限制**：
+                         原版靠两条按天触发的 GameLogic（定义表 gameLogicsDefs.tsv）在 day_pride 当天 1% 把
+                         粉笔板设 1、99% 又设回 0，而接单要求粉笔板大于 0（源码 208885）—— 于是只有那一天能接。
+                         打开本项后粉笔板一直保持开启（按游戏自己的写法，源码 248618），哪天都能接单；
+                         同时把订单上的"本周已完成"标记也清掉，刚交完的单当天就能再接。
+                         只影响【可再生】订单；一次性订单仍需 RepeatNonRenewableOrders。
+                         Off by default. Set it to true to remove the vanilla "pride day only" restriction:
+                         two day-triggered game logics set chalk_board_enabled to 1 at 1% of the pride day
+                         and back to 0 at 99% of it, while accepting an order needs it above 0 (source
+                         208885). With this on the chalk board stays enabled (the way the game sets it,
+                         source 248618), so orders can be accepted any day; the "finished this week" flag
+                         is cleared as well. Renewable orders only; one-off orders still need
+                         RepeatNonRenewableOrders.
+
   OrderSlotsEnabled      默认关。false = 把槽位收回原版数量（多出来的槽位移除，其上的订单被取消）；
                          true = 按下面的 OrderSlots 管理（可增可减，取消规则相同）。
                          Off by default. false shrinks the slots back to the vanilla count, removing
@@ -158,22 +189,35 @@ folder:
 高级配置（不自动生成，普通用户用不到）
 Advanced config (not created automatically, most players never need it)
 -----------------------------------------------------------------------
-上面这些之外的项（库存口径、刷新间隔、换行、一次性订单重复、详细日志）
+上面这些之外的项（库存口径、刷新间隔、换行、一次性订单重复、托盘空间排队、托盘扩容、详细日志）
 被刻意从主配置里隐藏，放在同目录的 gk2.OrderOptimizer.advanced.cfg 里：
 【删掉该文件或某些键 = 用默认值】，需要时自己新建并只写要改的键。
-Everything else (stock scope, refresh interval, wrapping, repeatable one-off orders, verbose
-logging) is deliberately hidden from the main config and lives in gk2.OrderOptimizer.advanced.cfg in
-the same folder. Delete the file (or individual keys) to use the defaults; create it and write only
-the keys you want to change.
+Everything else (stock scope, refresh interval, wrapping, repeatable one-off orders, the palette
+space queue, palette enlargement, verbose logging) is deliberately hidden from the main config and
+lives in gk2.OrderOptimizer.advanced.cfg in the same folder. Delete the file (or individual keys) to
+use the defaults; create it and write only the keys you want to change.
 
   StockScope = StationZone           库存口径：StationZone = 只数补给仓库（默认），WholeBase = 整个基地
   UpdateIntervalSeconds = 2          刷新间隔（0.5 ~ 60 秒）
-  OrderSlotsPerRow = 0               每行几个槽位换行；0 = 不换行（保持游戏原排列）
+  OrderSlotsPerRow = 0               每行几个槽位；0 = 自动（按画布宽度尽量多放，最多 6 个一排）、
+                                     1 = 不换行（保持游戏原排列）、2 至 6 = 固定每行几个
   RepeatNonRenewableOrders = false   true = 一次性订单也能重复交
+  PaletteSpaceGuard = true           默认开：订单按托盘空闲格数排队，装不下就等（详见上面那一节）
+  LoadingShelfSize = 40              给装货货架按 4 格基准放大：t2（4 格）→ 40、t1（2 格）→ 20。
+                                     原版货架只有 2/4 格，塞不下整批订单，这正是"永远凑不齐、生产全停"
+                                     的根源；填 0 = 关闭并还原成原版格数。
+                                     Scales the loading shelves from a 4-slot baseline: t2 (4 slots) to 40,
+                                     t1 (2 slots) to 20. The vanilla shelves are too small to stage a whole
+                                     batch - that is the root cause of "never reaching a full order". 0 = off,
+                                     which restores the vanilla sizes.
+                                     画面仍然只画 4 个箱子，但实际能放 40 个；多出来的箱子只是不画出来，不会丢失。
+                                     The shelf model still draws only 4 boxes - it really holds 40, the extras are
+                                     simply not rendered, and nothing is lost.
   VerboseLogging = false             详细日志（发布版默认关，不往日志里写记录）
 
-  StockScope / UpdateIntervalSeconds / OrderSlotsPerRow /
-  RepeatNonRenewableOrders / VerboseLogging - same defaults as listed above.
+  StockScope / UpdateIntervalSeconds / OrderSlotsPerRow / RepeatNonRenewableOrders /
+  PaletteSpaceGuard / LoadingShelfSize / VerboseLogging
+  - same defaults as listed above.
   （RepeatNonRenewableOrders 打开后一次性订单也能重复接、重复交，等于无限刷好感/科技点；
      VerboseLogging 打开后可看到每次开关变动、当前缺口与库存，发布版默认不记录。）
 
